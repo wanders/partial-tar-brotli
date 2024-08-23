@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use flate2::read::GzDecoder;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -16,6 +17,9 @@ struct Args {
 
     #[arg(short, long)]
     output: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    auto_decompress_gz: bool,
 
     #[arg()]
     files: Vec<PathBuf>,
@@ -70,6 +74,33 @@ fn generate_archive_filename(orig: &Path) -> PathBuf {
     res
 }
 
+fn add_file_to_archive<W: Write>(
+    args: &Args,
+    archive: &mut tar::Builder<W>,
+    file: &Path,
+) -> Result<()> {
+    if args.auto_decompress_gz && file.extension().unwrap_or_default() == "gz" {
+        if args.verbose {
+            eprintln!("Decompressing {} for better compression.", file.display());
+        }
+
+        let mut uncompressed = tempfile::tempfile()?;
+        let mut gz = GzDecoder::new(File::open(file)?);
+
+        std::io::copy(&mut gz, &mut uncompressed)?;
+        uncompressed.seek(std::io::SeekFrom::Start(0)).expect("seek");
+        archive
+            .append_file(generate_archive_filename(&file.with_extension("")), &mut uncompressed)
+            .context("Could not add decompressed file to archive")?;
+    } else {
+        archive
+            .append_path_with_name(file, generate_archive_filename(file))
+            .context("Could not add file to archive")?;
+    }
+
+    Ok(())
+}
+
 fn do_write(args: &Args) -> Result<()> {
     let mut out = File::create_new(&args.output).context("Could not create output file")?;
 
@@ -86,9 +117,7 @@ fn do_write(args: &Args) -> Result<()> {
     for file in &args.files {
         let before_pos = flush_and_get_position(&mut archive)?;
 
-        archive
-            .append_path_with_name(file, generate_archive_filename(file))
-            .context("Could not add file to archive")?;
+        add_file_to_archive(args, &mut archive, file)?;
 
         let after_pos = flush_and_get_position(&mut archive)?;
         if after_pos > args.max_size {
